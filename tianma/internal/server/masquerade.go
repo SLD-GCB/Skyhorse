@@ -38,14 +38,22 @@ func NewMasquerade(config MasqueradeConfig) (http.Handler, error) {
 			_, _ = writer.Write([]byte(content))
 		}), nil
 	case "file":
-		if config.Root == "" {
+		root := config.Root
+		if root == "" {
+			root = config.Content
+		}
+		if root == "" {
 			return nil, fmt.Errorf("masquerade: root is required for type file")
 		}
-		return http.FileServer(http.Dir(config.Root)), nil
+		return http.FileServer(http.Dir(root)), nil
 	case "proxy":
-		target, err := url.Parse(config.ProxyURL)
+		proxyURL := config.ProxyURL
+		if proxyURL == "" {
+			proxyURL = config.Content
+		}
+		target, err := url.Parse(proxyURL)
 		if err != nil || target.Host == "" {
-			return nil, fmt.Errorf("masquerade: bad proxy_url %q", config.ProxyURL)
+			return nil, fmt.Errorf("masquerade: bad proxy_url %q", proxyURL)
 		}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		originalDirector := proxy.Director
