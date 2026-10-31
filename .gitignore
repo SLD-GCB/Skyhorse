@@ -31,3 +31,19 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# SkyHorse
+release/
+_publish/
+bin/
+/tianma/e2e/
+/singbox/e2e/
+*.pem
+*.pfx
+*.err
+*.out
+probe*.json
+speed-test.json
+tun-test.json
+no-tls.json
+with-tls.json
