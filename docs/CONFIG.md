@@ -75,8 +75,11 @@
 | `max_memory_mb` | 0 | 0 = 不限制；每条 TCP relay 预留 64 KiB |
 | `masquerade.type` | `404` | `404` / `string` / `file` / `proxy` |
 | `masquerade.content` | 空 | `string` 的 HTML |
-| `masquerade.root` | 空 | `file` 的目录 |
-| `masquerade.proxy_url` | 空 | `proxy` 的目标 |
+| `masquerade.status_code` | 200 | `string` 的状态码 |
+| `masquerade.headers` | 空 | `string` 的响应头，值可为字符串或数组 |
+| `masquerade.directory` | 空 | `file` 的目录 |
+| `masquerade.url` | 空 | `proxy` 的目标地址 |
+| `masquerade.rewrite_host` | false | `proxy` 是否改写 Host |
 
 ## 2. 客户端（tianma/internal/client）
 
