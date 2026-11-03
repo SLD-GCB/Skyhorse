@@ -6,8 +6,11 @@
 
 | 文档 | 内容 |
 |---|---|
-| [PROTOCOL.md](PROTOCOL.md) | 线协议：认证、TCP、UDP、混淆、轮换、拥塞控制 |
-| [CONFIG.md](CONFIG.md) | 服务端、客户端、面板的全部配置字段与默认值 |
+| [PROTOCOL-QUIC.md](PROTOCOL-QUIC.md) | **迁移目标**：原生 QUIC 流 + QUIC DATAGRAM |
+| [PROTOCOL-H3.md](PROTOCOL-H3.md) | 旧 H3 规范，已决定废弃 |
+| [ADAPTER.md](ADAPTER.md) | **内核与面板适配**：字段映射、配置生成、已知缺口 |
+| [PROTOCOL.md](PROTOCOL.md) | 旧裸流协议，已废弃，仅存档 |
+| [CONFIG.md](CONFIG.md) | 配置字段（部分内容已过时，以 ADAPTER.md 为准） |
 | [DEPLOY.md](DEPLOY.md) | 面板、Linux 服务端、Windows/Android 客户端、TUN |
 | [BUILD.md](BUILD.md) | 从源码构建内核、面板、客户端，含 Android libbox |
 | [SECURITY.md](SECURITY.md) | 威胁模型、安全边界、已知缺口 |
@@ -17,19 +20,15 @@
 
 ```
 tianma/                 协议核心（Go module）
-  internal/proto        线格式
-  internal/wire         TLS、QUIC、UDP 传输
-  internal/obfs         Salamander 混淆与轮换
+  internal/proto        认证常量与 token 编解码
+  internal/wire         TLS、QUIC、H3 门控
   internal/congestion   Brutal、BBR、loss guard
   internal/policy       目的地策略
   internal/guard        限流、配额、内存水位
-  internal/client       客户端
-  internal/server       服务端
+  internal/client       H3 客户端、连接池
   boxapi/               给内核用的公开门面
 
 singbox/                sing-box 适配层（type: "skyhorse"）
-  cmd/skyhorse          内核 CLI
-
 HorseUI/                面板（s-ui fork + back-machine）
 HorseBox/               Windows / Android 客户端
 ```

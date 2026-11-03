@@ -1,4 +1,7 @@
-# 天马线协议
+# 天马线协议（已废弃）
+
+> 本文描述旧的 QUIC 裸流 / 0x401 帧协议，已不再适用。  
+> 当前 H3 协议规范见 [PROTOCOL-H3.md](PROTOCOL-H3.md)，内核适配见 [ADAPTER.md](ADAPTER.md)。
 
 ## 1. 角色与传输
 

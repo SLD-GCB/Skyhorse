@@ -1,0 +1,1 @@
+{"log":{"level":"error"},"outbounds":[{"type":"skyhorse","tag":"proxy","server":"127.0.0.1","server_port":4433,"uuid":"alice-1","password":"secret","obfs_password":"k"}],"route":{"final":"proxy"}}

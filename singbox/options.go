@@ -26,7 +26,16 @@ type InboundOptions struct {
 
 	TLS *option.InboundTLSOptions `json:"tls,omitempty"`
 
-	ObfsPassword string `json:"obfs_password"`
+	ObfsPassword string   `json:"obfs_password"`
+	ObfsKeys     []string `json:"obfs_keys,omitempty"`
+	NodeID       string   `json:"node_id,omitempty"`
+	PortRange    string   `json:"port_range,omitempty"`
+	FailureMode  string   `json:"failure_mode,omitempty"`
+
+	Connections             int `json:"connections,omitempty"`
+	MaxConnections          int `json:"max_connections,omitempty"`
+	MaxStreamsPerConnection int `json:"max_streams_per_connection,omitempty"`
+	PortRotateSeconds       int `json:"port_rotate_seconds,omitempty"`
 
 	ObfsRotationSeconds  int `json:"obfs_rotation_seconds,omitempty"`
 	ObfsToleranceSeconds int `json:"obfs_tolerance_seconds,omitempty"`
@@ -34,8 +43,8 @@ type InboundOptions struct {
 	UpMbps   int `json:"up_mbps,omitempty"`
 	DownMbps int `json:"down_mbps,omitempty"`
 
-	IgnoreClientBandwidth   bool `json:"ignore_client_bandwidth,omitempty"`
-	DisableLossCompensation bool `json:"disable_loss_compensation,omitempty"`
+	IgnoreClientBandwidth   bool   `json:"ignore_client_bandwidth,omitempty"`
+	DisableLossCompensation bool   `json:"disable_loss_compensation,omitempty"`
 	BBRProfile              string `json:"bbr_profile,omitempty"`
 
 	Policy core.PolicyConfig `json:"policy,omitempty"`
@@ -43,8 +52,6 @@ type InboundOptions struct {
 
 	Quota       core.QuotaConfig `json:"quota,omitempty"`
 	MaxMemoryMB int              `json:"max_memory_mb,omitempty"`
-
-	Masquerade core.MasqueradeConfig `json:"masquerade,omitempty"`
 }
 
 // OutboundOptions is a SkyHorse client node.
@@ -57,7 +64,9 @@ type OutboundOptions struct {
 
 	TLS *option.OutboundTLSOptions `json:"tls,omitempty"`
 
-	ObfsPassword string `json:"obfs_password"`
+	ObfsPassword string   `json:"obfs_password"`
+	ObfsKeys     []string `json:"obfs_keys,omitempty"`
+	NodeID       string   `json:"node_id,omitempty"`
 
 	ObfsRotationSeconds  int `json:"obfs_rotation_seconds,omitempty"`
 	ObfsToleranceSeconds int `json:"obfs_tolerance_seconds,omitempty"`
@@ -67,7 +76,25 @@ type OutboundOptions struct {
 
 	BBRProfile string `json:"bbr_profile,omitempty"`
 
-	DisableLossCompensation bool `json:"disable_loss_compensation,omitempty"`
+	DisableLossCompensation bool     `json:"disable_loss_compensation,omitempty"`
+	Connections             int      `json:"connections,omitempty"`
+	MaxConnections          int      `json:"max_connections,omitempty"`
+	MaxStreamsPerConnection int      `json:"max_streams_per_connection,omitempty"`
+	PortRotateSeconds       int      `json:"port_rotate_seconds,omitempty"`
+	ServerPorts             []string `json:"server_ports,omitempty"`
+}
+
+func optionKeys(keys []string, fallback string) [][]byte {
+	out := make([][]byte, 0, len(keys)+1)
+	for _, key := range keys {
+		if key != "" {
+			out = append(out, []byte(key))
+		}
+	}
+	if len(out) == 0 && fallback != "" {
+		out = append(out, []byte(fallback))
+	}
+	return out
 }
 
 // pinHex returns the first configured SPKI pin as hex, which is the form the

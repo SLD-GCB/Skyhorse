@@ -38,6 +38,8 @@ func main() {
 	outboundRegistry := include.OutboundRegistry()
 	skyhorsebox.RegisterInbound(inboundRegistry)
 	skyhorsebox.RegisterOutbound(outboundRegistry)
+	skyhorsebox.RegisterKuaimaInbound(inboundRegistry)
+	skyhorsebox.RegisterKuaimaOutbound(outboundRegistry)
 
 	ctx := box.Context(
 		context.Background(),

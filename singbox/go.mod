@@ -9,6 +9,8 @@ require (
 	tianma v0.0.0
 )
 
+require github.com/posener/h2conn v0.0.0-20231204025407-3997deeca0f0 // indirect
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/RyuaNerin/go-krypto v1.3.0 // indirect
@@ -182,7 +184,10 @@ require (
 	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
+	skyhorse.local/kuaima v0.0.0
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
 
 replace tianma => ../tianma
+
+replace skyhorse.local/kuaima => ../kuaima

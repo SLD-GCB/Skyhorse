@@ -4,16 +4,18 @@
 package boxapi
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
-	"io"
 	"net"
 	"net/http"
+	"time"
 
 	quic "github.com/apernet/quic-go"
 
 	"tianma/internal/client"
 	"tianma/internal/congestion"
 	"tianma/internal/guard"
+	"tianma/internal/obfs"
 	"tianma/internal/policy"
 	"tianma/internal/proto"
 	"tianma/internal/server"
@@ -22,31 +24,59 @@ import (
 
 // Wire constants.
 const (
-	URLHost             = proto.URLHost
-	URLPath             = proto.URLPath
-	HeaderAuth          = proto.HeaderAuth
-	HeaderPadding       = proto.HeaderPadding
-	StatusAuthOK        = proto.StatusAuthOK
-	FrameTypeTCPRequest = proto.FrameTypeTCPRequest
-	StatusOKByte        = proto.StatusOKByte
-	StatusErrorByte     = proto.StatusErrorByte
+	URLHost       = proto.URLHost
+	URLPath       = proto.URLPath
+	HeaderAuth    = proto.HeaderAuth
+	HeaderPadding = proto.HeaderPadding
+	StatusAuthOK  = proto.StatusAuthOK
 )
-
-// Addr is a target address.
-type Addr = proto.Addr
 
 // Config is the client configuration.
 type Config = client.Config
 
-// Client is the protocol client.
-type Client = client.Client
+// H3Client carries the tunnel inside HTTP/3 CONNECT streams.
+type H3Client = client.H3Client
 
-// UDPConn is the datagram side of the client.
-type UDPConn = client.UDPConn
+// NewH3 builds an HTTP/3 tunnel client.
+func NewH3(config Config) (*H3Client, error) {
+	return client.NewH3(config)
+}
 
-// NewClient builds a protocol client.
-func NewClient(config Config) (*Client, error) {
-	return client.New(config)
+// NewGateServer wraps a server packet conn with the dynamic gate.
+func NewGateServer(conn net.PacketConn, secret []byte) net.PacketConn {
+	return wire.NewGateServer(conn, secret)
+}
+
+// NewGateClient wraps a client packet conn with the dynamic gate.
+func NewGateClient(conn net.PacketConn, secret []byte) net.PacketConn {
+	return wire.NewGateClient(conn, secret)
+}
+
+// WrapObfs wraps a packet conn with Salamander obfuscation.
+func WrapObfs(conn net.PacketConn, password string) (net.PacketConn, error) {
+	if password == "" {
+		return conn, nil
+	}
+	key := sha256.Sum256([]byte(password))
+	return obfs.WrapPacketConnSalamander(conn, key[:])
+}
+
+// WrapObfsKeys wraps a packet conn with rotating Salamander keys. Server mode
+// accepts all keys; client mode rotates on the given interval.
+func WrapObfsKeys(conn net.PacketConn, passwords []string, rotate time.Duration, server bool) (net.PacketConn, error) {
+	keys := make([][]byte, 0, len(passwords))
+	for _, password := range passwords {
+		if password != "" {
+			keys = append(keys, []byte(password))
+		}
+	}
+	if len(keys) == 0 {
+		return conn, nil
+	}
+	if server {
+		return obfs.WrapServerKeys(conn, keys)
+	}
+	return obfs.WrapClientKeys(conn, keys, rotate)
 }
 
 // ServerTLS loads the listener certificate.
@@ -64,40 +94,16 @@ func QUICConfig() *quic.Config {
 	return wire.QUICConfig()
 }
 
-// NewUDPTransport opens the UDP socket with optional obfuscation.
-func NewUDPTransport(address string, key []byte) (*quic.Transport, *net.UDPConn, error) {
-	return wire.NewUDPTransport(address, key)
-}
-
-// ReadTCPRequest reads a TCP request frame.
-func ReadTCPRequest(r io.Reader) (Addr, error) {
-	return proto.ReadTCPRequest(r)
-}
-
 // DecodeToken parses the auth header value.
 func DecodeToken(value string) (string, []byte, error) {
 	return proto.DecodeToken(value)
 }
 
-// UDPMessage is one datagram or fragment.
-type UDPMessage = proto.UDPMessage
-
-// ParseUDPMessage decodes one datagram.
-func ParseUDPMessage(buffer []byte) (UDPMessage, error) { return proto.ParseUDPMessage(buffer) }
-
-// AppendUDPMessage encodes one datagram.
-func AppendUDPMessage(dst []byte, message UDPMessage) ([]byte, error) {
-	return proto.AppendUDPMessage(dst, message)
-}
-
-
-// ParseAddr converts "host:port" into an Addr.
-func ParseAddr(target string) (Addr, error) { return proto.ParseAddr(target) }
-
 // UseBrutal installs the adaptive fixed-rate sender on a connection.
 func UseBrutal(conn *quic.Conn, bytesPerSecond uint64, disableLossCompensation bool) {
 	congestion.UseBrutal(conn, bytesPerSecond, disableLossCompensation)
 }
+
 // HeaderCCRX is the bandwidth declaration header.
 const HeaderCCRX = proto.HeaderCCRX
 
@@ -124,6 +130,7 @@ type GuardConfig = guard.Config
 func NewGuard(config GuardConfig) *guard.Guard {
 	return guard.New(config)
 }
+
 // Guard is the compiled abuse boundary.
 type Guard = guard.Guard
 
@@ -157,9 +164,4 @@ func NewMasquerade(config MasqueradeConfig) (http.Handler, error) {
 // SelfSigned reports whether the certificate is self-signed.
 func SelfSigned(path string) (bool, error) {
 	return wire.SelfSigned(path)
-}
-
-// NewUDPTransportRotating opens the UDP socket with time-rotating obfuscation.
-func NewUDPTransportRotating(address string, master []byte, rotationSeconds, toleranceSeconds int) (*quic.Transport, *net.UDPConn, error) {
-	return wire.NewUDPTransportRotating(address, master, rotationSeconds, toleranceSeconds)
 }

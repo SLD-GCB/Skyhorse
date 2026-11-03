@@ -1,0 +1,1 @@
+{"log":{"level":"error"},"inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"mtu":9000,"stack":"mixed","auto_route":true,"strict_route":true}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}

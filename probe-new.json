@@ -1,0 +1,14 @@
+{
+  "log": { "level": "debug" },
+  "inbounds": [ { "type": "socks", "tag": "s", "listen": "127.0.0.1", "listen_port": 21089 } ],
+  "outbounds": [ {
+    "type": "skyhorse", "tag": "proxy",
+    "server": "103.247.28.18", "server_port": 10000,
+    "uuid": "ceabe3fd-dcea-459c-bcb2-06ba11f215a3",
+    "password": "yjsee5ZbsNhMsdP9",
+    "obfs_password": "s4qyEWaVwuBK8Mwb",
+    "obfs_rotation_seconds": 3600,
+    "tls": { "enabled": true, "server_name": "localhost", "insecure": true }
+  } ],
+  "route": { "final": "proxy" }
+}

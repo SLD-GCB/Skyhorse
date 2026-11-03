@@ -1,109 +1,137 @@
 package obfs
 
 import (
-	"crypto/rand"
-	"encoding/binary"
-	"io"
+	"crypto/sha256"
+	"errors"
 	"net"
+	"sync"
 	"time"
-
-	"golang.org/x/crypto/blake2b"
 )
 
-const rotationLabel = "tianma-obfs-rotate"
+// Multi-key Salamander wrapper. Each packet is prefixed with a one-byte key
+// index so the server can accept the current and previous generation without
+// guessing (Salamander itself has no authentication tag).
+const rotateHeaderSize = 1
 
-// RotatingPacketConn derives a fresh Salamander key every rotation window from
-// a master secret. The frame carries the epoch, so a leaked per-window key
-// expires with the window instead of exposing the link forever.
-//
-// Wire format: epoch(4) | salt(8) | ciphertext
-type RotatingPacketConn struct {
-	net.PacketConn
-	master    []byte
-	interval  time.Duration
-	tolerance time.Duration
+type rotatePacketConn struct {
+	conn    net.PacketConn
+	obfs    []obfuscator
+	server  bool
+	rotate  time.Duration
+	started time.Time
+
+	mu      sync.Mutex
+	addrKey map[string]byte
+
+	readBuf    []byte
+	readMutex  sync.Mutex
+	writeBuf   []byte
+	writeMutex sync.Mutex
 }
 
-// NewRotating wraps conn with time-based key rotation.
-func NewRotating(conn net.PacketConn, master []byte, rotationSeconds, toleranceSeconds int) *RotatingPacketConn {
-	if rotationSeconds <= 0 {
-		rotationSeconds = 3600
+// WrapClientKeys wraps a client packet conn with rotating Salamander keys.
+func WrapClientKeys(conn net.PacketConn, keys [][]byte, rotate time.Duration) (net.PacketConn, error) {
+	obfsList, err := makeObfsList(keys)
+	if err != nil {
+		return nil, err
 	}
-	if toleranceSeconds < 0 {
-		toleranceSeconds = 0
+	return &rotatePacketConn{
+		conn: conn, obfs: obfsList, rotate: rotate, started: time.Now(),
+		addrKey: make(map[string]byte), readBuf: make([]byte, udpBufferSize), writeBuf: make([]byte, udpBufferSize),
+	}, nil
+}
+
+// WrapServerKeys wraps a server packet conn and accepts every key in keys.
+func WrapServerKeys(conn net.PacketConn, keys [][]byte) (net.PacketConn, error) {
+	obfsList, err := makeObfsList(keys)
+	if err != nil {
+		return nil, err
 	}
-	return &RotatingPacketConn{
-		PacketConn: conn,
-		master:     append([]byte(nil), master...),
-		interval:   time.Duration(rotationSeconds) * time.Second,
-		tolerance:  time.Duration(toleranceSeconds) * time.Second,
+	return &rotatePacketConn{
+		conn: conn, obfs: obfsList, server: true,
+		addrKey: make(map[string]byte), readBuf: make([]byte, udpBufferSize), writeBuf: make([]byte, udpBufferSize),
+	}, nil
+}
+
+func makeObfsList(keys [][]byte) ([]obfuscator, error) {
+	if len(keys) == 0 {
+		return nil, errors.New("obfs: at least one key is required")
+	}
+	out := make([]obfuscator, 0, len(keys))
+	for _, key := range keys {
+		sum := sha256.Sum256(key)
+		ob, err := newSalamanderObfuscator(sum[:])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ob)
+	}
+	return out, nil
+}
+
+func (c *rotatePacketConn) keyIndex() byte {
+	if c.server || c.rotate <= 0 || len(c.obfs) < 2 {
+		return 0
+	}
+	step := int64(time.Since(c.started) / c.rotate)
+	return byte(step % int64(len(c.obfs)))
+}
+
+func (c *rotatePacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
+	for {
+		n, addr, err := c.conn.ReadFrom(c.readBuf)
+		if err != nil {
+			return 0, addr, err
+		}
+		if n <= rotateHeaderSize {
+			continue
+		}
+		index := c.readBuf[0]
+		if int(index) >= len(c.obfs) {
+			continue
+		}
+		out := c.obfs[index].Deobfuscate(c.readBuf[rotateHeaderSize:n], p)
+		if out <= 0 {
+			continue
+		}
+		if c.server {
+			c.mu.Lock()
+			c.addrKey[addr.String()] = index
+			c.mu.Unlock()
+		}
+		return out, addr, nil
 	}
 }
 
-func (c *RotatingPacketConn) currentEpoch() uint32 {
-	return uint32(time.Now().Unix() / int64(c.interval/time.Second))
-}
-
-func (c *RotatingPacketConn) accepts(epoch uint32) bool {
-	windows := uint32(c.tolerance / c.interval)
-	current := c.currentEpoch()
-	return epoch+windows >= current && epoch <= current+windows
-}
-
-func rotationKey(master []byte, epoch uint32) [32]byte {
-	material := make([]byte, 0, len(master)+len(rotationLabel)+4)
-	material = append(material, master...)
-	material = append(material, rotationLabel...)
-	var encoded [4]byte
-	binary.BigEndian.PutUint32(encoded[:], epoch)
-	material = append(material, encoded[:]...)
-	return blake2b.Sum256(material)
-}
-
-func (c *RotatingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	epoch := c.currentEpoch()
-	salt := make([]byte, 8)
-	if _, err := rand.Read(salt); err != nil {
-		return 0, err
+func (c *rotatePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	index := c.keyIndex()
+	if c.server {
+		c.mu.Lock()
+		if saved, ok := c.addrKey[addr.String()]; ok {
+			index = saved
+		}
+		c.mu.Unlock()
 	}
-	key := rotationKey(c.master, epoch)
-
-	frame := make([]byte, 12+len(p))
-	binary.BigEndian.PutUint32(frame[0:4], epoch)
-	copy(frame[4:12], salt)
-	for index := range p {
-		frame[12+index] = p[index] ^ key[index%32]
+	if int(index) >= len(c.obfs) {
+		index = 0
 	}
-	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+	out := c.obfs[index].Obfuscate(p, c.writeBuf[1:])
+	if out <= 0 {
+		return 0, errors.New("obfs: packet too large")
+	}
+	c.writeBuf[0] = index
+	if _, err := c.conn.WriteTo(c.writeBuf[:out+1], addr); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
-func (c *RotatingPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buffer := make([]byte, 65535)
-	for {
-		n, addr, err := c.PacketConn.ReadFrom(buffer)
-		if err != nil {
-			return 0, nil, err
-		}
-		if n <= 12 {
-			continue
-		}
-
-		epoch := binary.BigEndian.Uint32(buffer[:4])
-		if !c.accepts(epoch) {
-			continue
-		}
-		key := rotationKey(c.master, epoch)
-		payload := buffer[12:n]
-		for index := range payload {
-			payload[index] ^= key[index%32]
-		}
-		if len(payload) > len(p) {
-			return 0, nil, io.ErrShortBuffer
-		}
-		copy(p, payload)
-		return len(payload), addr, nil
-	}
-}
+func (c *rotatePacketConn) Close() error                       { return c.conn.Close() }
+func (c *rotatePacketConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
+func (c *rotatePacketConn) SetDeadline(t time.Time) error      { return c.conn.SetDeadline(t) }
+func (c *rotatePacketConn) SetReadDeadline(t time.Time) error  { return c.conn.SetReadDeadline(t) }
+func (c *rotatePacketConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }

@@ -1,10 +1,12 @@
 package wire
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"time"
 
@@ -67,15 +69,18 @@ func Token(state *tls.ConnectionState, uuid, password string) ([]byte, error) {
 // QUICConfig returns the transport parameters. The windows are sized for
 // video and bulk transfer at evening-peak RTTs.
 func QUICConfig() *quic.Config {
+	var seed [8]byte
+	_, _ = rand.Read(seed[:])
+	value := binary.BigEndian.Uint64(seed[:])
 	return &quic.Config{
 		MaxIdleTimeout:                 60 * time.Second,
 		KeepAlivePeriod:                15 * time.Second,
-		MaxIncomingStreams:             1024,
+		MaxIncomingStreams:             int64(128 + value%256),
 		InitialStreamReceiveWindow:     1 << 20,
 		MaxStreamReceiveWindow:         8 << 20,
 		InitialConnectionReceiveWindow: 2 << 20,
 		MaxConnectionReceiveWindow:     64 << 20,
-		InitialPacketSize:              1452,
+		InitialPacketSize:              1200 + uint16(value%253),
 		EnableDatagrams:                true,
 		MaxDatagramFrameSize:           1200,
 		AssumePeerMaxDatagramFrameSize: 1200,

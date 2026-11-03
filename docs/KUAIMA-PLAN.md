@@ -337,7 +337,7 @@ TLS 在 obfs 门里面，网络上看不到；再自定义帧只会增加实现�
 
 ### 面板
 
-- 新增 `type: "kuaima"`；
+- 新增 `type: "fasthorse"`；
 - 入站字段：端口段、用户、证书、policy/guard/quota；
 - 订阅只输出一条记录，带端口段；
 - 不再为每个端口建 inbound。

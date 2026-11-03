@@ -30,7 +30,7 @@ param(
 
     [string]$OutDir = '',
 
-    [string]$Version = '1.14.3',
+    [string]$Version = '1.14.4',
 
     [string]$AndroidProject = '',
 
@@ -122,8 +122,8 @@ function Sync-AndroidSources {
     $dstAdapter = Join-Path $thirdParty 'skyhorse-adapter'
     if (-not (Test-Path $dstAdapter)) { New-Item -ItemType Directory -Force $dstAdapter | Out-Null }
     foreach ($name in @(
-            'datagram.go', 'inbound_skyhorse.go', 'options.go', 'options_test.go',
-            'outbound_skyhorse.go', 'udp_inbound.go', 'go.mod', 'go.sum'
+            'inbound_native.go', 'options.go', 'options_test.go',
+            'outbound_skyhorse.go', 'go.mod', 'go.sum'
         )) {
         $src = Join-Path $Root "singbox\$name"
         if (Test-Path $src) { Copy-Item $src (Join-Path $dstAdapter $name) -Force }
