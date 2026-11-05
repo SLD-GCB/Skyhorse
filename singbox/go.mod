@@ -191,3 +191,5 @@ require (
 replace tianma => ../tianma
 
 replace skyhorse.local/kuaima => ../kuaima
+
+replace github.com/sagernet/sing-mux => ../sing-mux

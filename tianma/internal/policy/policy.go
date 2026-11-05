@@ -40,7 +40,7 @@ func New(config Config) (*Policy, error) {
 		compiled.ports = make(map[uint16]bool, len(config.AllowedPorts))
 		for _, port := range config.AllowedPorts {
 			if port <= 0 || port > 65535 {
-				return nil, fmt.Errorf("policy: invalid port %d", port)
+				continue
 			}
 			compiled.ports[uint16(port)] = true
 		}
@@ -48,14 +48,14 @@ func New(config Config) (*Policy, error) {
 	for _, raw := range config.DeniedCIDRs {
 		prefix, err := netip.ParsePrefix(raw)
 		if err != nil {
-			return nil, fmt.Errorf("policy: bad denied cidr %q: %w", raw, err)
+			continue
 		}
 		compiled.denied = append(compiled.denied, prefix)
 	}
 	for _, raw := range config.AllowedCIDRs {
 		prefix, err := netip.ParsePrefix(raw)
 		if err != nil {
-			return nil, fmt.Errorf("policy: bad allowed cidr %q: %w", raw, err)
+			continue
 		}
 		compiled.allowed = append(compiled.allowed, prefix)
 	}

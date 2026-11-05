@@ -1,6 +1,7 @@
 package skyhorsebox
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -21,7 +22,10 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-mux"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 
 	core "tianma/boxapi"
 )
@@ -61,6 +65,9 @@ type Inbound struct {
 	transports []*quic.Transport
 	sockets    []*net.UDPConn
 	listeners  []*quic.Listener
+	connMu     sync.Mutex
+	conns      map[*quic.Conn]struct{}
+	muxService *mux.Service
 	cancel     context.CancelFunc
 }
 
@@ -93,6 +100,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, E.Cause(err, "skyhorse: policy")
 	}
+	muxService, muxErr := newMuxService(logger, router, adapter.InboundContext{Inbound: tag, Network: N.NetworkTCP})
+	if muxErr != nil {
+		return nil, E.Cause(muxErr, "skyhorse: mux")
+	}
 	return &Inbound{
 		Adapter:                 inbound.NewAdapter(Type, tag),
 		logger:                  logger,
@@ -115,6 +126,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		bbrProfile:              options.BBRProfile,
 		guard:                   core.NewGuard(options.Guard),
 		policy:                  compiledPolicy,
+		conns:                   make(map[*quic.Conn]struct{}),
+		muxService:              muxService,
 	}, nil
 }
 
@@ -180,10 +193,20 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 
-// Close releases all listeners and sockets.
+// Close releases all listeners, sockets and accepted connections.
 func (h *Inbound) Close() error {
 	if h.cancel != nil {
 		h.cancel()
+	}
+	h.connMu.Lock()
+	conns := make([]*quic.Conn, 0, len(h.conns))
+	for conn := range h.conns {
+		conns = append(conns, conn)
+	}
+	h.conns = make(map[*quic.Conn]struct{})
+	h.connMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.CloseWithError(0, "server closed")
 	}
 	for _, listener := range h.listeners {
 		_ = listener.Close()
@@ -220,7 +243,15 @@ func (h *Inbound) accept(ctx context.Context, listener *quic.Listener) {
 			_ = conn.CloseWithError(0x1, "too many connections")
 			continue
 		}
+		h.connMu.Lock()
+		h.conns[conn] = struct{}{}
+		h.connMu.Unlock()
 		go func() {
+			defer func() {
+				h.connMu.Lock()
+				delete(h.conns, conn)
+				h.connMu.Unlock()
+			}()
 			defer func() {
 				if h.maxConns > 0 {
 					h.liveConns.Add(-1)
@@ -251,13 +282,33 @@ func (h *Inbound) handleConn(ctx context.Context, conn *quic.Conn) {
 	}
 }
 
+type streamReaderWriter struct {
+	io.Reader
+	io.Writer
+}
+
 func (h *Inbound) handleStream(stream *quic.Stream, conn *quic.Conn, state *connState) {
 	defer stream.Close()
-	user, err := h.socksAuth(stream, conn)
+	reader := bufio.NewReader(stream)
+	first, err := reader.Peek(1)
 	if err != nil {
 		return
 	}
-	command, target, err := readSocksRequest(stream)
+	if first[0] != 5 {
+		source := M.ParseSocksaddr(conn.RemoteAddr().String())
+		h.muxService.NewConnectionEx(context.Background(), &streamNetConn{
+			Reader: reader,
+			Writer: stream,
+			closer: stream,
+		}, source, M.Socksaddr{}, func(error) {})
+		return
+	}
+	rw := &streamReaderWriter{Reader: reader, Writer: stream}
+	user, err := h.socksAuth(rw, conn)
+	if err != nil {
+		return
+	}
+	command, target, err := readSocksRequest(rw)
 	if err != nil || command == 0 {
 		return
 	}
@@ -275,7 +326,7 @@ func (h *Inbound) handleStream(stream *quic.Stream, conn *quic.Conn, state *conn
 	}
 }
 
-func (h *Inbound) socksAuth(stream *quic.Stream, conn *quic.Conn) (User, error) {
+func (h *Inbound) socksAuth(stream io.ReadWriter, conn *quic.Conn) (User, error) {
 	ip := remoteIP(conn.RemoteAddr())
 	if h.guard.AuthBlocked(ip) {
 		return User{}, errors.New("skyhorse: auth blocked")

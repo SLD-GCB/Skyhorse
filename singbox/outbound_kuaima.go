@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -28,10 +29,16 @@ func RegisterKuaimaOutbound(registry *outbound.Registry) {
 // KuaimaOutbound is a Kuaima client node.
 type KuaimaOutbound struct {
 	outbound.Adapter
-	clients    []*client.Client
-	inflight   []atomic.Int64
-	counter    atomic.Uint64
-	maxStreams int64
+	mu       sync.Mutex
+	cfg      client.Config
+	ports    []uint16
+	next     int
+	client   *client.Client
+	hopEvery time.Duration
+	hopStop  chan struct{}
+	hopOnce  sync.Once
+	hopWG    sync.WaitGroup
+	sem      chan struct{}
 }
 
 // NewKuaimaOutbound builds the client without dialing.
@@ -73,186 +80,246 @@ func NewKuaimaOutbound(ctx context.Context, router adapter.Router, logger log.Co
 		}
 		ports = parsed
 	}
-	connections := options.Connections
-	if connections <= 0 {
-		connections = 1
+	if options.PortHopEnabled != nil && !*options.PortHopEnabled {
+		ports = []uint16{options.ServerPort}
 	}
 	outboundNode := &KuaimaOutbound{
 		Adapter: outbound.NewAdapterWithDialerOptions(TypeFastHorse, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
 	}
-	maxStreams := options.MaxStreamsPerConnection
-	if maxStreams <= 0 {
-		maxStreams = 32
+	baseCfg := client.Config{
+		Server:               options.Server,
+		ServerName:           serverName,
+		Username:             options.Username,
+		Password:             options.Password,
+		CertificatePEM:       certPEM,
+		Insecure:             options.TLS.Insecure,
+		Obfs:                 obfsConfig,
+		Gate:                 gateConfig,
+		UploadBytesPerSecond: options.UpMbps * 125000,
 	}
-	outboundNode.maxStreams = int64(maxStreams)
-	for i := 0; i < connections; i++ {
-		instance, err := client.New(ctx, client.Config{
-			Server:         options.Server,
-			Port:           ports[i%len(ports)],
-			ServerName:     serverName,
-			Username:       options.Username,
-			Password:       options.Password,
-			CertificatePEM: certPEM,
-			Insecure:       options.TLS.Insecure,
-			Obfs:           obfsConfig,
-			Gate:           gateConfig,
-		})
-		if err != nil {
-			return nil, E.Cause(err, "kuaima: client")
-		}
-		outboundNode.clients = append(outboundNode.clients, instance)
-		outboundNode.inflight = append(outboundNode.inflight, atomic.Int64{})
+	baseCfg.Port = ports[0]
+	instance, err := client.New(ctx, baseCfg)
+	if err != nil {
+		return nil, E.Cause(err, "kuaima: client")
+	}
+	outboundNode.cfg = baseCfg
+	outboundNode.ports = ports
+	outboundNode.client = instance
+	outboundNode.next = 1
+	streams := options.MaxStreamsPerConnection
+	if streams <= 0 {
+		streams = 64
+	}
+	outboundNode.sem = make(chan struct{}, streams)
+	outboundNode.hopEvery = 0
+	if options.PortHopEnabled != nil && *options.PortHopEnabled {
+		outboundNode.hopEvery = time.Duration(options.PortRotateSeconds) * time.Second
+	}
+	if len(ports) <= 1 {
+		outboundNode.hopEvery = 0
 	}
 	return outboundNode, nil
 }
 
 func (o *KuaimaOutbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
-	if stage != adapter.StartStateStart {
+	if stage != adapter.StartStateStart || o.hopEvery <= 0 {
 		return nil
 	}
-	for _, instance := range o.clients {
-		if err := instance.Start(); err != nil {
-			return err
+	o.hopStop = make(chan struct{})
+	stop := o.hopStop
+	o.hopWG.Add(1)
+	go func() {
+		defer o.hopWG.Done()
+		ticker := time.NewTicker(o.hopEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				o.rotateClient()
+			}
 		}
-		scope.Add(instance.Close)
-	}
+	}()
+	scope.Add(func() error {
+		o.hopOnce.Do(func() { close(stop) })
+		o.hopWG.Wait()
+		return nil
+	})
 	return nil
 }
 
-func (o *KuaimaOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	if N.NetworkName(network) == N.NetworkUDP {
-		return o.dialUDP(ctx, destination)
+func (o *KuaimaOutbound) rotateClient() {
+	o.mu.Lock()
+	if len(o.ports) == 0 {
+		o.mu.Unlock()
+		return
 	}
-	if N.NetworkName(network) != N.NetworkTCP {
-		return nil, E.New("kuaima: only tcp/udp is supported")
+	cfg := o.cfg
+	cfg.Port = o.ports[o.next%len(o.ports)]
+	o.next++
+	o.mu.Unlock()
+	instance, err := client.New(context.Background(), cfg)
+	if err != nil {
+		return
 	}
-	attempts := len(o.clients)
-	if attempts == 0 {
-		return nil, E.New("kuaima: no connections")
+	o.mu.Lock()
+	old := o.client
+	o.client = instance
+	o.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
 	}
-	lastErr := E.New("kuaima: no connection")
-	for i := 0; i < attempts; i++ {
-		index := o.pick()
-		o.inflight[index].Add(1)
-		conn, err := o.clients[index].DialContext(ctx, destination.String())
-		if err != nil {
-			o.inflight[index].Add(-1)
-			lastErr = err
-			continue
-		}
-		return &kuaimaConn{Conn: conn, index: index, outbound: o}, nil
-	}
-	return nil, lastErr
 }
 
-func (o *KuaimaOutbound) pick() int {
-	best := -1
-	bestValue := int64(0)
-	// 优先选还没到流上限的连接，把流摊开，减少单 TCP 队头阻塞。
-	for i := range o.inflight {
-		value := o.inflight[i].Load()
-		if value >= o.maxStreams {
-			continue
-		}
-		if best < 0 || value < bestValue {
-			best = i
-			bestValue = value
-		}
+func (o *KuaimaOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	o.mu.Lock()
+	instance := o.client
+	o.mu.Unlock()
+	if instance == nil {
+		return nil, E.New("kuaima: client not initialized")
 	}
-	if best >= 0 {
-		return best
-	}
-	for i := range o.inflight {
-		value := o.inflight[i].Load()
-		if best < 0 || value < bestValue {
-			best = i
-			bestValue = value
+	if N.NetworkName(network) == N.NetworkUDP {
+		if err := o.acquire(ctx); err != nil {
+			return nil, err
 		}
+		pc, err := instance.DialUDP(ctx, destination.String())
+		if err != nil {
+			o.release()
+			return nil, err
+		}
+		return &packetConnAdapter{PacketConn: pc, remote: destination.UDPAddr(), release: o.release}, nil
 	}
-	return best
+	if err := o.acquire(ctx); err != nil {
+		return nil, err
+	}
+	conn, err := instance.DialContext(ctx, destination.String())
+	if err != nil {
+		o.release()
+		return nil, err
+	}
+	return &limitedConn{Conn: conn, release: o.release}, nil
+}
+
+func (o *KuaimaOutbound) acquire(ctx context.Context) error {
+	select {
+	case o.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (o *KuaimaOutbound) release() {
+	select {
+	case <-o.sem:
+	default:
+	}
+}
+
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }
 
 func (o *KuaimaOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	pc, index, err := o.openUDP(ctx, destination)
-	if err != nil {
+	o.mu.Lock()
+	instance := o.client
+	o.mu.Unlock()
+	if instance == nil {
+		return nil, E.New("kuaima: client not initialized")
+	}
+	if err := o.acquire(ctx); err != nil {
 		return nil, err
 	}
-	return &kuaimaPacketConn{PacketConn: pc, index: index, outbound: o}, nil
-}
-
-func (o *KuaimaOutbound) dialUDP(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	pc, index, err := o.openUDP(ctx, destination)
+	pc, err := instance.DialUDP(ctx, destination.String())
 	if err != nil {
+		o.release()
 		return nil, err
 	}
-	return &kuaimaUDPConn{PacketConn: pc, index: index, outbound: o}, nil
+	return &packetConnAdapter{PacketConn: pc, release: o.release}, nil
 }
 
-func (o *KuaimaOutbound) openUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, int, error) {
-	attempts := len(o.clients)
-	if attempts == 0 {
-		return nil, 0, E.New("kuaima: no connections")
-	}
-	lastErr := E.New("kuaima: no connection")
-	for i := 0; i < attempts; i++ {
-		index := o.pick()
-		o.inflight[index].Add(1)
-		pc, err := o.clients[index].DialUDP(ctx, destination.String())
-		if err != nil {
-			o.inflight[index].Add(-1)
-			lastErr = err
-			continue
-		}
-		return pc, index, nil
-	}
-	return nil, 0, lastErr
+type packetConnAdapter struct {
+	net.PacketConn
+	remote  net.Addr
+	once    sync.Once
+	release func()
 }
+
+func (c *packetConnAdapter) Close() error {
+	err := c.PacketConn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+func (c *packetConnAdapter) Read(p []byte) (int, error) {
+	n, _, err := c.PacketConn.ReadFrom(p)
+	return n, err
+}
+
+func (c *packetConnAdapter) Write(p []byte) (int, error) {
+	return c.PacketConn.WriteTo(p, c.remote)
+}
+
+func (c *packetConnAdapter) RemoteAddr() net.Addr { return c.remote }
 
 func (o *KuaimaOutbound) Close() error {
-	for _, instance := range o.clients {
+	if o.hopStop != nil {
+		o.hopOnce.Do(func() { close(o.hopStop) })
+		o.hopWG.Wait()
+	}
+	o.mu.Lock()
+	instance := o.client
+	o.client = nil
+	o.mu.Unlock()
+	if instance != nil {
 		_ = instance.Close()
 	}
 	return nil
 }
 
-type kuaimaConn struct {
+type kuaimaDialer struct {
+	cfg   client.Config
+	ports []uint16
+	next  atomic.Uint64
+}
+
+func (d *kuaimaDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	index := d.next.Add(1) - 1
+	cfg := d.cfg
+	cfg.Port = d.ports[int(index)%len(d.ports)]
+	instance, err := client.New(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := instance.DialRaw(ctx)
+	if err != nil {
+		_ = instance.Close()
+		return nil, err
+	}
+	return &fhRotatingConn{Conn: conn, client: instance}, nil
+}
+
+type fhRotatingConn struct {
 	net.Conn
-	index    int
-	outbound *KuaimaOutbound
-	once     sync.Once
+	client *client.Client
+	once   sync.Once
 }
 
-func (c *kuaimaConn) Close() error {
+func (c *fhRotatingConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { c.outbound.inflight[c.index].Add(-1) })
+	c.once.Do(func() { _ = c.client.Close() })
 	return err
 }
 
-type kuaimaUDPConn struct {
-	net.PacketConn
-	index    int
-	outbound *KuaimaOutbound
-	once     sync.Once
-}
-
-func (c *kuaimaUDPConn) Read(p []byte) (int, error)  { return c.PacketConn.(net.Conn).Read(p) }
-func (c *kuaimaUDPConn) Write(p []byte) (int, error) { return c.PacketConn.(net.Conn).Write(p) }
-func (c *kuaimaUDPConn) RemoteAddr() net.Addr        { return c.PacketConn.(net.Conn).RemoteAddr() }
-func (c *kuaimaUDPConn) Close() error {
-	err := c.PacketConn.Close()
-	c.once.Do(func() { c.outbound.inflight[c.index].Add(-1) })
-	return err
-}
-
-type kuaimaPacketConn struct {
-	net.PacketConn
-	index    int
-	outbound *KuaimaOutbound
-	once     sync.Once
-}
-
-func (c *kuaimaPacketConn) Close() error {
-	err := c.PacketConn.Close()
-	c.once.Do(func() { c.outbound.inflight[c.index].Add(-1) })
-	return err
+func (d *kuaimaDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	return nil, E.New("kuaima: mux packet transport is not supported")
 }

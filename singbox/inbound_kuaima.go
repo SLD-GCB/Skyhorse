@@ -1,6 +1,7 @@
 package skyhorsebox
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-mux"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -34,15 +36,18 @@ func RegisterKuaimaInbound(registry *inbound.Registry) {
 // KuaimaInbound is a Kuaima server node.
 type KuaimaInbound struct {
 	inbound.Adapter
-	ctx       context.Context
-	logger    log.ContextLogger
-	router    adapter.Router
-	tlsConfig *tls.Config
-	obfs      obfs.Config
-	verifier  *gate.Verifier
-	users     map[string]string
-	failure   string
-	listeners []*listener.Listener
+	ctx        context.Context
+	logger     log.ContextLogger
+	router     adapter.Router
+	tlsConfig  *tls.Config
+	obfs       obfs.Config
+	verifier   *gate.Verifier
+	users      map[string]string
+	failure    string
+	listeners  []*listener.Listener
+	muxService *mux.Service
+	downBps    int
+	maxStreams int
 }
 
 // NewKuaimaInbound builds the node.
@@ -84,15 +89,28 @@ func NewKuaimaInbound(ctx context.Context, router adapter.Router, logger log.Con
 		obfsConfig.Keys = append(obfsConfig.Keys, obfs.Key{ID: key.ID, Password: key.Password})
 	}
 	node := &KuaimaInbound{
-		Adapter:   inbound.NewAdapter(TypeFastHorse, tag),
-		ctx:       ctx,
-		logger:    logger,
-		router:    router,
-		tlsConfig: tlsConfig,
-		obfs:      obfsConfig,
-		verifier:  gate.NewVerifier(gate.Config{Password: options.Obfs.Password, NodeID: options.Gate.NodeID}),
-		users:     users,
-		failure:   options.Gate.FailureMode,
+		Adapter:    inbound.NewAdapter(TypeFastHorse, tag),
+		ctx:        ctx,
+		logger:     logger,
+		router:     router,
+		tlsConfig:  tlsConfig,
+		obfs:       obfsConfig,
+		verifier:   gate.NewVerifier(gate.Config{Password: options.Obfs.Password, NodeID: options.Gate.NodeID}),
+		users:      users,
+		failure:    options.Gate.FailureMode,
+		downBps:    options.DownMbps * 125000,
+		maxStreams: options.MaxStreams,
+	}
+	if node.maxStreams <= 0 {
+		node.maxStreams = 128
+	}
+	node.muxService, err = newMuxService(logger, router, adapter.InboundContext{
+		Inbound:     tag,
+		InboundType: TypeFastHorse,
+		Network:     N.NetworkTCP,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "kuaima: mux")
 	}
 
 	ports, err := kuaimaPorts(options.ListenPortRange, options.ListenPort)
@@ -132,8 +150,19 @@ func (h *KuaimaInbound) NewConnection(ctx context.Context, conn net.Conn, metada
 		h.fail(conn)
 		return
 	}
+	reader := bufio.NewReader(tlsConn)
+	if magic, peekErr := reader.Peek(4); peekErr == nil && string(magic) == "FHMX" {
+		_, _ = reader.Discard(4)
+		h.muxService.NewConnectionEx(ctx, &streamNetConn{
+			Reader: reader,
+			Writer: tlsConn,
+			closer: tlsConn,
+		}, metadata.Source, M.Socksaddr{}, func(error) {})
+		return
+	}
+	tlsConn = &bufferedConn{Conn: tlsConn, reader: reader}
 	server := wire.NewServer(h.tlsConfig)
-	server.MaxStreams = 128
+	server.MaxStreams = uint32(h.maxStreams)
 	server.Authorize = func(ctx context.Context, r *http.Request) error {
 		gateUser := wire.UserFromContext(ctx)
 		name, password, ok := kuaimaBasicUser(r.Header.Get("Proxy-Authorization"))
@@ -143,6 +172,10 @@ func (h *KuaimaInbound) NewConnection(ctx context.Context, conn net.Conn, metada
 		return nil
 	}
 	server.Route = func(ctx context.Context, stream net.Conn, authority string) error {
+		if authority == "mux" {
+			h.muxService.NewConnectionEx(ctx, stream, metadata.Source, M.Socksaddr{}, func(error) {})
+			return nil
+		}
 		streamMetadata := adapter.InboundContext{
 			Inbound:     h.Tag(),
 			InboundType: h.Type(),
@@ -200,7 +233,11 @@ func (h *KuaimaInbound) NewConnection(ctx context.Context, conn net.Conn, metada
 		<-done
 		return nil
 	}
-	server.ServeConnContext(wire.WithUser(ctx, user), tlsConn)
+	var serveConn net.Conn = tlsConn
+	if h.downBps > 0 {
+		serveConn = newWriteLimitConn(serveConn, h.downBps)
+	}
+	server.ServeConnContext(wire.WithUser(ctx, user), serveConn)
 }
 
 func (h *KuaimaInbound) fail(conn net.Conn) {

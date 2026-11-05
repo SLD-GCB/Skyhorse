@@ -32,10 +32,11 @@ type InboundOptions struct {
 	PortRange    string   `json:"port_range,omitempty"`
 	FailureMode  string   `json:"failure_mode,omitempty"`
 
-	Connections             int `json:"connections,omitempty"`
-	MaxConnections          int `json:"max_connections,omitempty"`
-	MaxStreamsPerConnection int `json:"max_streams_per_connection,omitempty"`
-	PortRotateSeconds       int `json:"port_rotate_seconds,omitempty"`
+	Connections             int   `json:"connections,omitempty"`
+	MaxConnections          int   `json:"max_connections,omitempty"`
+	MaxStreamsPerConnection int   `json:"max_streams_per_connection,omitempty"`
+	PortRotateSeconds       int   `json:"port_rotate_seconds,omitempty"`
+	PortHopEnabled          *bool `json:"port_hop_enabled,omitempty"`
 
 	ObfsRotationSeconds  int `json:"obfs_rotation_seconds,omitempty"`
 	ObfsToleranceSeconds int `json:"obfs_tolerance_seconds,omitempty"`
@@ -81,6 +82,7 @@ type OutboundOptions struct {
 	MaxConnections          int      `json:"max_connections,omitempty"`
 	MaxStreamsPerConnection int      `json:"max_streams_per_connection,omitempty"`
 	PortRotateSeconds       int      `json:"port_rotate_seconds,omitempty"`
+	PortHopEnabled          *bool    `json:"port_hop_enabled,omitempty"`
 	ServerPorts             []string `json:"server_ports,omitempty"`
 }
 

@@ -15,6 +15,7 @@ import (
 
 	quic "github.com/apernet/quic-go"
 
+	"tianma/internal/congestion"
 	"tianma/internal/obfs"
 	"tianma/internal/proto"
 	"tianma/internal/wire"
@@ -90,6 +91,13 @@ func (c *H3Client) dial(ctx context.Context, address string, tlsConfig *tls.Conf
 		_ = socket.Close()
 		return nil, err
 	}
+	// The sender side also needs an explicit congestion controller; otherwise
+	// uploads fall back to the library default while downloads use BBR/Brutal.
+	if c.config.BBRProfile != "" {
+		congestion.UseBBR(conn, c.config.BBRProfile)
+	} else if c.config.UpMbps > 0 {
+		congestion.UseBrutal(conn, uint64(c.config.UpMbps)*125000, c.config.DisableLossCompensation)
+	}
 	c.mu.Lock()
 	c.quicConn = transport
 	c.socket = socket
@@ -100,9 +108,17 @@ func (c *H3Client) dial(ctx context.Context, address string, tlsConfig *tls.Conf
 func (c *H3Client) ensureConn(ctx context.Context) error {
 	c.mu.Lock()
 	conn := c.conn
-	c.mu.Unlock()
-	if conn != nil {
+	if conn != nil && conn.Context().Err() == nil {
+		c.mu.Unlock()
 		return nil
+	}
+	if conn != nil {
+		c.conn = nil
+		c.udpAssoc = nil
+		c.mu.Unlock()
+		_ = conn.CloseWithError(0, "")
+	} else {
+		c.mu.Unlock()
 	}
 	conn, err := c.dial(ctx, c.address(), c.tlsConfig, wire.QUICConfig())
 	if err != nil {
@@ -112,6 +128,28 @@ func (c *H3Client) ensureConn(ctx context.Context) error {
 	c.conn = conn
 	c.mu.Unlock()
 	return nil
+}
+
+// Alive reports whether the cached QUIC connection is still usable. A client
+// that has not dialed yet is considered alive and will connect on first use.
+func (c *H3Client) Alive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn == nil || c.conn.Context().Err() == nil
+}
+
+// invalidate drops a connection after a stream-level failure so the next
+// request reconnects instead of reusing a dead transport.
+func (c *H3Client) invalidate(conn *quic.Conn) {
+	c.mu.Lock()
+	if c.conn != conn {
+		c.mu.Unlock()
+		return
+	}
+	c.conn = nil
+	c.udpAssoc = nil
+	c.mu.Unlock()
+	_ = conn.CloseWithError(0, "")
 }
 
 func (c *H3Client) token() (string, error) {
@@ -130,13 +168,30 @@ func (c *H3Client) token() (string, error) {
 }
 
 func (c *H3Client) openStream(ctx context.Context) (*quic.Stream, error) {
-	if err := c.ensureConn(ctx); err != nil {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := c.ensureConn(ctx); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		stream, err := conn.OpenStreamSync(ctx)
+		if err == nil {
+			return stream, nil
+		}
+		c.invalidate(conn)
+	}
+	return nil, errors.New("tianma: open stream failed")
+}
+
+// DialRaw opens a QUIC stream without the SOCKS5 handshake. It is used as the
+// transport for sing-mux, which carries its own stream framing.
+func (c *H3Client) DialRaw(ctx context.Context) (net.Conn, error) {
+	stream, err := c.openStream(ctx)
+	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	conn := c.conn
-	c.mu.Unlock()
-	return conn.OpenStreamSync(ctx)
+	return &streamConn{Stream: stream}, nil
 }
 
 // Dial opens one SOCKS5 TCP CONNECT stream.
@@ -164,6 +219,12 @@ func (c *H3Client) DialUDP(ctx context.Context, target string) (net.PacketConn, 
 	}
 	c.mu.Lock()
 	assoc := c.udpAssoc
+	if assoc != nil {
+		if sc, ok := assoc.(*streamConn); ok && sc.Stream.Context().Err() != nil {
+			assoc = nil
+			c.udpAssoc = nil
+		}
+	}
 	c.mu.Unlock()
 	if assoc == nil {
 		stream, err := c.openStream(ctx)

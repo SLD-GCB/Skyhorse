@@ -49,6 +49,15 @@ type KuaimaInboundOptions struct {
 	Gate            KuaimaGateOptions         `json:"gate,omitempty"`
 	TLS             *option.InboundTLSOptions `json:"tls,omitempty"`
 	ListenPortRange string                    `json:"listen_port_range,omitempty"`
+	ServerPorts     []string                  `json:"server_ports,omitempty"`
+	MaxStreams      int                       `json:"max_streams_per_connection,omitempty"`
+	PortHopEnabled  *bool                     `json:"port_hop_enabled,omitempty"`
+	PortRotate      int                       `json:"port_rotate_seconds,omitempty"`
+	UpMbps          int                       `json:"up_mbps,omitempty"`
+	DownMbps        int                       `json:"down_mbps,omitempty"`
+	// Deprecated: accepted only so old saved configs still validate.
+	Connections int     `json:"connections,omitempty"`
+	TargetMbps  float64 `json:"target_mbps,omitempty"`
 }
 
 // KuaimaOutboundOptions 客户端节点。
@@ -61,7 +70,12 @@ type KuaimaOutboundOptions struct {
 	Gate                    KuaimaGateOptions          `json:"gate,omitempty"`
 	TLS                     *option.OutboundTLSOptions `json:"tls,omitempty"`
 	ServerPorts             []string                   `json:"server_ports,omitempty"`
-	Connections             int                        `json:"connections,omitempty"`
+	PortHopEnabled          *bool                      `json:"port_hop_enabled,omitempty"`
+	PortRotateSeconds       int                        `json:"port_rotate_seconds,omitempty"`
 	MaxStreamsPerConnection int                        `json:"max_streams_per_connection,omitempty"`
-	TargetMbps              float64                    `json:"target_mbps,omitempty"`
+	UpMbps                  int                        `json:"up_mbps,omitempty"`
+	DownMbps                int                        `json:"down_mbps,omitempty"`
+	// Deprecated: accepted only so old subscription configs still validate.
+	Connections int     `json:"connections,omitempty"`
+	TargetMbps  float64 `json:"target_mbps,omitempty"`
 }

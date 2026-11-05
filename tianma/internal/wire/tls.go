@@ -73,13 +73,13 @@ func QUICConfig() *quic.Config {
 	_, _ = rand.Read(seed[:])
 	value := binary.BigEndian.Uint64(seed[:])
 	return &quic.Config{
-		MaxIdleTimeout:                 60 * time.Second,
-		KeepAlivePeriod:                15 * time.Second,
-		MaxIncomingStreams:             int64(128 + value%256),
-		InitialStreamReceiveWindow:     1 << 20,
-		MaxStreamReceiveWindow:         8 << 20,
-		InitialConnectionReceiveWindow: 2 << 20,
-		MaxConnectionReceiveWindow:     64 << 20,
+		MaxIdleTimeout:                 300 * time.Second,
+		KeepAlivePeriod:                10 * time.Second,
+		MaxIncomingStreams:             int64(256 + value%256),
+		InitialStreamReceiveWindow:     2 << 20,
+		MaxStreamReceiveWindow:         16 << 20,
+		InitialConnectionReceiveWindow: 8 << 20,
+		MaxConnectionReceiveWindow:     128 << 20,
 		InitialPacketSize:              1200 + uint16(value%253),
 		EnableDatagrams:                true,
 		MaxDatagramFrameSize:           1200,
