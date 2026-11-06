@@ -103,6 +103,7 @@ cd singbox && go test ./... -count=1
 - [构建](docs/BUILD.md)
 - [安全模型](docs/SECURITY.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
+- [天马 / 快马面板配置指南](tianma/PANEL-CONFIG-GUIDE.md)
 
 ## 状态
 
