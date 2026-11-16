@@ -83,12 +83,17 @@ func (p *Policy) Check(ctx context.Context, host string, port uint16) (netip.Add
 	if len(addresses) == 0 {
 		return netip.Addr{}, fmt.Errorf("policy: %s has no address", host)
 	}
+	var chosen netip.Addr
 	for _, address := range addresses {
 		if err := p.checkIP(address); err != nil {
 			return netip.Addr{}, fmt.Errorf("policy: %s resolves to a blocked address: %w", host, err)
 		}
+		// 优先 IPv4：服务器可能没有 IPv6 路由，不能只拨 DNS 返回的第一个地址。
+		if !chosen.IsValid() || (address.Is4() && !chosen.Is4()) {
+			chosen = address
+		}
 	}
-	return addresses[0], nil
+	return chosen, nil
 }
 
 func (p *Policy) checkIP(ip netip.Addr) error {
