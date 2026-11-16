@@ -2,6 +2,8 @@
 
 _**本人在此郑重声明，我开发的UDP代理协议遵守AGPLv3.0协议，源码成品开源，不存在公开售卖和索要任何赞助的行为，如有假冒请勿上当**_
 
+_**内核源码地址：<https://github.com/SLD-GCB/SkyHorse-core-skyhorse_fasthorse>(包含了快马协议和天马协议)**_
+
 天马是一个基于 **原生 QUIC/UDP** 的代理协议。第四代不再在 QUIC 之上叠加 smux，而是直接使用 QUIC 原生多流：
 
 ```
